@@ -206,45 +206,48 @@ file_handler = RotatingFileHandler(
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
 
-# Tables you want to block (case-insensitive).
+# ---- Read blocked tables from env ----
+# Example in .env:
+# BLOCKED_TABLES=raw.pii_users, finance.payments_ledger, secret_table
 BLOCKED_TABLES = {
-    "allparticipants",
+    t.strip()
+    for t in os.getenv("BLOCKED_TABLES", "").split(",")
+    if t.strip()
 }
 
-# This matches quoted or unquoted identifiers, with or without schema,
-# and respects word boundaries so 'secret_table_bak' won't trigger.
-def _compile_block_patterns(blocked=set()):
-    pats = []
+def _compile_block_patterns(blocked: set[str]) -> list[re.Pattern]:
+    """
+    Compile regexes that match quoted/unquoted, schema-qualified or plain names.
+    """
+    patterns: list[re.Pattern] = []
     for name in blocked:
         parts = name.split(".")
         if len(parts) == 2:
             schema, table = map(re.escape, parts)
+            # e.g. raw.pii_users (with optional quotes/whitespace)
             pat = rf'(?i)(?<![\w"])("?\b{schema}\b"?\s*\.\s*"?\b{table}\b"?)'
         else:
             table = re.escape(parts[0])
             pat = rf'(?i)(?<![\w"])("?\b{table}\b"?)'
-        pats.append(re.compile(pat))
-    return pats
+        patterns.append(re.compile(pat))
+    return patterns
 
 _BLOCK_PATTERNS = _compile_block_patterns(BLOCKED_TABLES)
 
-def _strip_sql_comments(sql):
-    # Remove /* ... */ and -- ... comments to avoid false positives in comments
+def _strip_sql_comments(sql: str) -> str:
+    # Remove /* ... */ and -- ... to avoid matches in comments
     sql = re.sub(r"/\*.*?\*/", " ", sql, flags=re.S)
     sql = re.sub(r"--[^\n]*", " ", sql)
     return sql
 
-def SQL_QUERY_MUTATOR(sql, **kwargs):
+def SQL_QUERY_MUTATOR(sql: str, **kwargs) -> str:
     """
-    If the SQL references a blocked table, raise an error and prevent execution.
-    Otherwise, prefix the SQL with a comment (optional) and pass it through.
+    Blocks queries that reference any table in BLOCKED_TABLES.
     """
     cleaned = _strip_sql_comments(sql)
 
-    # Look for any blocked table patterns
     for pat in _BLOCK_PATTERNS:
         if pat.search(cleaned):
-            # Raise an exception to stop SQL Lab from running this query
             raise Exception(
                 "This query references a restricted table and cannot be executed. "
                 "If you believe you need access, contact the data admin."
